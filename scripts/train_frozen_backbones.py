@@ -32,6 +32,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="configs/atmozero_default.yaml")
     ap.add_argument("--windows", required=True, help="parquet of (station, t_start, T_w) windows")
+    ap.add_argument("--stations", required=True, help="stations parquet for lat/lon/elev/koppen lookup")
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--skip_patchtst", action="store_true")
     ap.add_argument("--skip_decoder", action="store_true")
@@ -44,12 +45,18 @@ def main() -> None:
     if not args.skip_patchtst:
         pcfg = PatchTSTConfig(**cfg.get("frozen", {}).get("patchtst", {}))
         print(f"[train_frozen_backbones] training PatchTST: {pcfg}")
-        train_patchtst(pcfg, windows_path=args.windows, output_path=str(out / "patchtst.pt"))
+        train_patchtst(
+            pcfg, windows_path=args.windows, output_path=str(out / "patchtst.pt"),
+            stations_path=args.stations,
+        )
 
     if not args.skip_decoder:
         dcfg = DiTConfig(**cfg.get("frozen", {}).get("decoder", {}))
         print(f"[train_frozen_backbones] training DiT decoder G_phi: {dcfg}")
-        train_dit_decoder(dcfg, windows_path=args.windows, output_path=str(out / "dit.pt"))
+        train_dit_decoder(
+            dcfg, windows_path=args.windows, output_path=str(out / "dit.pt"),
+            stations_path=args.stations,
+        )
 
 
 if __name__ == "__main__":

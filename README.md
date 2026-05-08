@@ -96,10 +96,12 @@ python scripts/prepare_era5.py \
     --n_stations 8192 \
     --output_dir data/processed
 
-# 2. Train F_ψ (PatchTST) and G_φ (8-layer DiT)
-python scripts/train_frozen_backbones.py \
+# 2. Train F_ψ (PatchTST) and G_φ (8-layer DiT) on real ARCO-ERA5 windows.
+#    Multi-GPU via accelerate (set --num_processes to your GPU count).
+accelerate launch --num_processes 4 scripts/train_frozen_backbones.py \
     --config configs/atmozero_default.yaml \
-    --windows data/processed/windows.parquet \
+    --windows  data/processed/windows.parquet \
+    --stations data/processed/stations.parquet \
     --output_dir runs/frozen
 
 # 3. Calibrate verifier thresholds via stratified 5-fold cross-fit
@@ -120,12 +122,13 @@ python scripts/prepare_verl_data.py \
 # 4b. AtmoZero GRPO post-training (verl on 4 × H100)
 bash scripts/run_verl.sh
 
-# 5. Generate held-out captions via vLLM
+# 5. Generate held-out captions via vLLM (set --tensor_parallel_size to your GPU count)
 python scripts/generate_captions.py \
     --checkpoint runs/atmozero/final \
     --windows    data/processed/windows.parquet \
     --stations   data/processed/stations.parquet \
     --split      test \
+    --tensor_parallel_size 4 \
     --out        runs/atmozero/captions.jsonl
 
 # 6a. Faithfulness (eight metrics + window-paired bootstrap CIs)

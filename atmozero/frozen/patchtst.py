@@ -5,8 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
+
+from atmozero.data.era5 import ERA5Loader, WindowSpec
+
+
+CANONICAL_CHANNELS = ("T", "P", "q", "u", "v", "r")
 
 
 @dataclass
@@ -55,73 +61,110 @@ def train_patchtst(
     windows_path: str,
     output_path: str,
     *,
+    stations_path: Optional[str] = None,
     epochs: int = 37,
     lr: float = 5e-4,
     weight_decay: float = 1e-2,
     batch_size: int = 256,
     history_length: int = 192,
     horizon: Optional[int] = None,
-    device: str = "cpu",
     seed: int = 42,
 ) -> None:
+    """Train F_psi on real ARCO-ERA5 windows. Multi-GPU via ``accelerate launch``."""
     import pandas as pd
+    from accelerate import Accelerator
 
     if horizon is not None:
         cfg = PatchTSTConfig(**{**cfg.__dict__, "horizon": horizon})
 
-    torch.manual_seed(seed)
-    model = PatchTSTForecaster(cfg).to(device)
+    accelerator = Accelerator()
+    torch.manual_seed(seed + accelerator.process_index)
+
+    model = PatchTSTForecaster(cfg)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     loss_fn = nn.MSELoss()
+    model, opt, sched = accelerator.prepare(model, opt, sched)
 
     index = pd.read_parquet(windows_path)
     index = index[index["split"] == "train"].reset_index(drop=True)
+    if stations_path is not None:
+        stations = pd.read_parquet(stations_path).set_index("station_id")
+        index = index.join(stations, on="station_id", how="left")
+    _require_station_metadata(index)
 
-    rng = torch.Generator(device="cpu").manual_seed(seed)
+    loader = ERA5Loader()
+    rng = np.random.default_rng(seed + accelerator.process_index)
+    per_rank_batch = max(1, batch_size // accelerator.num_processes)
     n_steps = max(len(index) // batch_size, 1)
     for epoch in range(epochs):
         epoch_loss = 0.0
         for _ in range(n_steps):
-            idx = torch.randint(0, len(index), (batch_size,), generator=rng).tolist()
-            x_hist, y_fut = _fetch_batch(index, idx, history_length, cfg.horizon, cfg.n_channels)
-            x_hist = x_hist.to(device); y_fut = y_fut.to(device)
+            idx = rng.integers(0, len(index), size=per_rank_batch).tolist()
+            x_hist, y_fut = _fetch_batch(index, idx, history_length, cfg.horizon, cfg.n_channels, loader)
+            x_hist = x_hist.to(accelerator.device); y_fut = y_fut.to(accelerator.device)
             y_hat = model(x_hist)
             loss = loss_fn(y_hat, y_fut)
             opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            accelerator.backward(loss)
+            accelerator.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             epoch_loss += float(loss.detach())
         sched.step()
-        print(f"[train_patchtst] epoch {epoch + 1}/{epochs}  loss={epoch_loss / n_steps:.4f}")
+        if accelerator.is_main_process:
+            print(f"[train_patchtst] epoch {epoch + 1}/{epochs}  loss={epoch_loss / n_steps:.4f}")
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": model.state_dict(), "config": cfg.__dict__}, output_path)
-    print(f"[train_patchtst] wrote {output_path}")
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"state_dict": accelerator.unwrap_model(model).state_dict(),
+                    "config": cfg.__dict__}, output_path)
+        print(f"[train_patchtst] wrote {output_path}")
 
 
-def _fetch_batch(index, idx, history_length, horizon, n_channels):
+def _require_station_metadata(index) -> None:
+    missing = [c for c in ("lat", "lon", "elevation", "koppen_zone") if c not in index.columns]
+    if missing:
+        raise ValueError(
+            f"window index is missing station columns {missing}; pass --stations to "
+            "train_frozen_backbones.py / pre-join the stations parquet"
+        )
+
+
+def _fetch_batch(index, idx, history_length, horizon, n_channels, loader: Optional[ERA5Loader] = None):
+    """Pull ``len(idx)`` (history, future) pairs from ARCO-ERA5 and stack them."""
+    if loader is None:
+        loader = ERA5Loader()
     B = len(idx)
-    rng = torch.Generator(device="cpu")
     out_x = torch.zeros(B, history_length, n_channels)
     out_y = torch.zeros(B, horizon, n_channels)
+    needed = history_length + horizon
     for i, row_idx in enumerate(idx):
         row = index.iloc[row_idx]
-        seed = (hash((row.get("station_id"), row.get("t_start"))) & 0xFFFFFFFF) ^ row_idx
-        rng.manual_seed(int(seed))
-        full = _synthetic_window(history_length + horizon, n_channels, rng)
+        spec = WindowSpec(
+            station_id=int(row["station_id"]),
+            lat=float(row["lat"]),
+            lon=float(row["lon"]),
+            elevation=float(row["elevation"]),
+            koppen_zone=str(row["koppen_zone"]),
+            t_start=np.datetime64(str(row["t_start"]), "h"),
+            T_w=needed,
+        )
+        window = loader.fetch(spec)
+        full = _stack_channels(window, needed, n_channels)
         out_x[i] = full[:history_length]
-        out_y[i] = full[history_length:]
+        out_y[i] = full[history_length:history_length + horizon]
     return out_x, out_y
 
 
-def _synthetic_window(T_total: int, n_channels: int, rng: torch.Generator) -> torch.Tensor:
-    """Deterministic six-channel surface trace at canonical scales."""
-    t = torch.arange(T_total).float()
-    diurnal = torch.sin(2 * torch.pi * t / 24.0).unsqueeze(-1).repeat(1, n_channels)
-    drift = torch.linspace(-1.0, 1.0, T_total).unsqueeze(-1).repeat(1, n_channels)
-    noise = torch.randn(T_total, n_channels, generator=rng) * 0.2
-    scales = torch.tensor([5.0, 1.0, 0.005, 1.5, 1.5, 0.3])[: n_channels]
-    base = torch.tensor([285.0, 1013.0, 0.008, 0.0, 0.0, 0.0])[: n_channels]
-    return base + scales * (diurnal + 0.5 * drift + noise)
+def _stack_channels(window: dict, T_total: int, n_channels: int) -> torch.Tensor:
+    cols = []
+    for ch in CANONICAL_CHANNELS[:n_channels]:
+        arr = window.get(ch)
+        if arr is None:
+            raise KeyError(f"ARCO-ERA5 window missing canonical channel {ch!r}")
+        cols.append(np.asarray(arr, dtype=np.float32)[:T_total])
+    stacked = np.stack(cols, axis=-1)  # (T, C)
+    if stacked.shape[0] < T_total:
+        raise ValueError(f"ARCO-ERA5 window shorter than expected ({stacked.shape[0]} < {T_total})")
+    return torch.from_numpy(stacked)
