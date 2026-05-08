@@ -1,0 +1,80 @@
+experiment:
+  name: atmozero
+  seeds: [42, 7, 2024]
+  output_dir: <YOUR_RUN_DIR>
+
+solver:
+  backbone: Qwen/Qwen2.5-7B-Instruct
+  bf16: true
+  flash_attention: true
+  max_new_tokens: 384
+  temperature: 1.0
+  top_p: 0.95
+
+proposer:
+  n_windows: 8192
+  n_regimes: 16
+  entropy_bonus: 0.05
+  infeasibility_penalty: 1.0
+
+reward:
+  lambda: 2.0
+  mu: 0.22
+  nu: 0.06
+  weights:
+    "1": 0.142857
+    "2": 0.142857
+    "3": 0.142857
+    "4": 0.142857
+    "5": 0.142857
+    "6": 0.142857
+    "7": 0.142858
+
+shaping:
+  alpha0: 0.42
+  beta0: 0.31
+  tau_alpha: 610
+  tau_beta: 740
+  clamp_step: 1960
+
+cold_start:
+  threshold: 0.84
+
+grpo:
+  total_steps: 2450
+  group_size: 8
+  batch_size: 32
+  learning_rate: 4.8e-6
+  proposer_lr: 1.0e-4
+  weight_decay: 0.08
+  grad_clip: 1.0
+  kl_coef: 0.025
+  clip_epsilon: 0.20
+
+data:
+  source: "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+  T_w: 192
+  stride: 12
+  n_stations: 8192
+  K_neighbors: 8
+  neighbor_radius_km: 250
+  splits:
+    train: ["2014-01-01", "2022-12-31"]
+    val:   ["2023-01-01", "2023-12-31"]
+    test:  ["2024-01-01", "2025-12-31"]
+  forecast_horizons: [96, 192, 336, 720]
+
+frozen:
+  patchtst:
+    patch_len: 16
+    stride: 8
+    hidden: 256
+    n_layers: 6
+    n_heads: 8
+    epochs: 37
+  decoder:
+    hidden: 384
+    n_layers: 8
+    n_heads: 8
+    n_diffusion_steps: 28
+    epochs: 46
