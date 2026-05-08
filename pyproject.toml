@@ -12,9 +12,10 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.2",
     "transformers>=4.45",
-    "trl>=0.11",
+    "verl>=0.4",
+    "vllm>=0.6",
+    "ray>=2.10",
     "accelerate>=0.34",
-    "peft>=0.13",
     "datasets>=2.21",
     "xarray>=2024.6",
     "zarr>=2.17",
@@ -24,13 +25,9 @@ dependencies = [
     "scipy>=1.13",
     "scikit-learn>=1.5",
     "pyyaml>=6.0",
-    "pydantic>=2.7",
     "tqdm>=4.66",
     "wandb>=0.18",
 ]
-
-[project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.6", "mypy>=1.11"]
 
 [tool.setuptools.packages.find]
 include = ["atmozero*"]

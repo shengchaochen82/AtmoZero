@@ -18,19 +18,24 @@ atmozero/                  # the importable package
 │   └── thresholds.py      # stratified 5-fold cross-fit
 ├── caption/               # typed-claim list grammar + permissive parser
 ├── reward/                # R = Σ wₖ Sₖ − λU + μC + νD; shaping, cycle, uplift
-├── policies/              # π_S Solver, π_P Proposer, cold-start protocol
-├── grpo/                  # group-relative trainer with bi-level objective
 ├── frozen/                # F_ψ PatchTST and G_φ 8-layer DiT
 ├── eval/                  # faithfulness metrics, forecasting, bootstrap CIs
+├── proposer.py            # window sampler + cold-start gate (τ_cold = 0.84)
+├── verl_reward.py         # verl compute_score bridge → verifier + reward
+├── verl_dataset.py        # AtmoZero RLHFDataset subclass for verl
 └── utils/
 
-configs/atmozero_default.yaml   # the canonical training config
+configs/
+├── atmozero_default.yaml   # paper-anchored hyperparameters
+└── verl_grpo.yaml          # verl Hydra config (GRPO)
 
 scripts/
 ├── prepare_era5.py             # ARCO-ERA5 + station network + window index
 ├── train_frozen_backbones.py   # train F_ψ (PatchTST) and G_φ (DiT)
 ├── calibrate_thresholds.py     # 5-fold cross-fit on the held-out 200-window set
-├── train_atmozero.py           # GRPO post-training (Proposer–Solver self-play)
+├── prepare_verl_data.py        # parquet → verl prompt dataset (with extra_info)
+├── run_verl.sh                 # GRPO post-training launch (verl)
+├── generate_captions.py        # vLLM caption generation on held-out windows
 ├── eval_faithfulness.py        # eight-metric faithfulness audit
 └── eval_forecast.py            # caption-conditioned forecasting MSE/MAE
 
@@ -105,16 +110,31 @@ python scripts/calibrate_thresholds.py \
     --strata     data/annotation/strata.npy \
     --output     runs/thresholds.json
 
-# 4. AtmoZero post-training
-python scripts/train_atmozero.py --config configs/atmozero_default.yaml
+# 4a. Build the verl prompt parquet (one-time)
+python scripts/prepare_verl_data.py \
+    --windows  data/processed/windows.parquet \
+    --stations data/processed/stations.parquet \
+    --split    train \
+    --out      data/processed/verl_train.parquet
 
-# 5a. Faithfulness (eight metrics + window-paired bootstrap CIs)
+# 4b. AtmoZero GRPO post-training (verl on 4 × H100)
+bash scripts/run_verl.sh
+
+# 5. Generate held-out captions via vLLM
+python scripts/generate_captions.py \
+    --checkpoint runs/atmozero/final \
+    --windows    data/processed/windows.parquet \
+    --stations   data/processed/stations.parquet \
+    --split      test \
+    --out        runs/atmozero/captions.jsonl
+
+# 6a. Faithfulness (eight metrics + window-paired bootstrap CIs)
 python scripts/eval_faithfulness.py \
     --captions runs/atmozero/captions.jsonl \
     --labels   data/annotation/labels.jsonl \
     --bootstrap 1000
 
-# 5b. Caption-conditioned forecasting (MSE/MAE × {96, 192, 336, 720})
+# 6b. Caption-conditioned forecasting (MSE/MAE × {96, 192, 336, 720})
 python scripts/eval_forecast.py \
     --checkpoint runs/atmozero/final \
     --patchtst   runs/frozen/patchtst.pt \
